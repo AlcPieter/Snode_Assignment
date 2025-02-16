@@ -1,0 +1,583 @@
+# ================================
+# 1. Ingestion Source
+# ================================
+
+[sources.fortigate-in]
+type = "file"
+include = ["/etc/vector/input.log"]
+read_from = "beginning"
+ignore_checkpoints = true
+
+# =================================
+# 2. Log parsing and initial normalization
+# =================================
+
+[transforms.fortigate-transform-main]
+inputs = ["fortigate-in"]
+type = "remap"
+drop_on_error = true
+reroute_dropped = true
+source = '''
+	# 1. Parse & Timestamp
+	parsed, err = parse_grok(.message, "%{SYSLOGTIMESTAMP:timestamp} %{IPORHOST:host} %{GREEDYDATA:log}")
+	kv_parsed, err = parse_key_value(parsed.log)
+	parsed_timestamp, parse_err = from_unix_timestamp(to_int!(kv_parsed.eventtime), "nanoseconds")
+	if parse_err == null {
+	  .@timestamp = parsed_timestamp
+	} else {
+	  .@timestamp = now()
+	}
+	del(.file)
+	del(.host)
+	del(.source_type)
+	del(.message)
+	del(.timestamp)
+
+	# 2. Initialize Fields
+	.firewall_details = ""
+	.action = ""
+	.action_type = ""
+	.level = ""
+	.severity = "LOW"
+	.status_text = "SUCCESS"
+	.status_code = 0
+	.status_reason = ""
+	.status_type = "INFO"
+	.src = ""
+	.srcip = ""
+	.srcport = null
+	.src_country_code = ""
+	.srcintf = ""
+	.srcmac = ""
+	.dst = ""
+	.dstip = ""
+	.dstport = ""
+	.dst_country_code = ""
+	.dstintf = ""
+	.dstmac = ""
+	.sentbyte = 0
+	.rcvdbyte = 0
+	.event_id_desc = ""
+	.event_id = 0
+	.test_event_id = 0
+	.test_route_flow = ""
+	.test_subtype_code = ""
+	.test_type_code = ""
+	.siem_type = ""
+	.siem_subtype = ""
+	.hostname = null
+	.event_details = ""
+	.file_path = ""
+	.user = ""
+	.ap = null
+	.app = null
+	.domain = ""
+	.url = ""
+	.mac = ""
+	.proto = ""
+	.application_name = ""
+	.enrich_status = true
+	.siem = true
+	.siem_vendor = "fortigate"
+	.siem_application = "fortigate"
+	.event_type = ""
+	.event_group = ""
+	.event_service = ""
+	.event_target = ""
+	.policytype = null
+	.resource_details = ""
+	.srccountry = null
+	.dstcountry = null
+	.service = null
+
+	# 3. Build firewall_details & siem_source
+	if kv_parsed.devname != null {
+	  .firewall_details, err = .firewall_details + "devName=" + to_string(kv_parsed.devname) + " | "
+	  .siem_source, err = to_string(kv_parsed.devname)
+	}
+	if kv_parsed.vd != null {
+	  .firewall_details, err = .firewall_details + "vd=" + to_string(kv_parsed.vd) + " | "
+	}
+	if kv_parsed.policy != null {
+	  .firewall_details, err = .firewall_details + "policy=" + to_string(kv_parsed.policy)
+	} else if kv_parsed.policytype != null {
+	  .firewall_details, err = .firewall_details + "policy=" + to_string(kv_parsed.policytype)
+	} else {
+	  .firewall_details = .firewall_details + "policy="
+	}
+
+	# 4. IP & Port Fields
+	if kv_parsed.srcip != null {
+	  .src, err = to_string(kv_parsed.srcip)
+	  .srcip, err = to_string(kv_parsed.srcip)
+	}
+	if kv_parsed.dstip != null {
+	  .dst, err = to_string(kv_parsed.dstip)
+	  .dstip, err = to_string(kv_parsed.dstip)
+	}
+	if kv_parsed.srcport != null {
+	  .srcport, err = to_string(kv_parsed.srcport)
+	}
+	if kv_parsed.dstport != null {
+	  .dstport, err = to_string(kv_parsed.dstport)
+	}
+	
+	 if (.srcip == "" && kv_parsed.ui != null) {
+		 temp_ui, err = to_string(kv_parsed.ui)
+		 parts = split(temp_ui, "(")
+		 if length(parts) > 1 {
+			 sub_parts, err = split(parts[1], ")")
+			 if length(sub_parts) > 0 {
+				 extracted_ip = sub_parts[0]
+				 .srcip = extracted_ip
+				 if .src == ""{
+					.src = extracted_ip
+				}
+			 }
+		 }
+	 }
+
+	# 5. Country Fields
+	if kv_parsed.srccountry != null {
+	  sc_str, err = to_string(kv_parsed.srccountry)
+	  if sc_str == "Reserved" {
+		.src_country_code = ""
+	  } else {
+		.src_country_code = sc_str
+	  }
+	}
+	if kv_parsed.dstcountry != null {
+	  dc_str, err = to_string(kv_parsed.dstcountry)
+	  if dc_str == "Reserved" {
+		.dst_country_code = ""
+	  } else {
+		.dst_country_code = dc_str
+	  }
+	}
+
+	# 6. Interfaces
+	if kv_parsed.srcintf != null {
+	  .srcintf, err = to_string(kv_parsed.srcintf)
+	} else {
+	  .srcintf = null
+	}
+	if kv_parsed.dstintf != null {
+	  .dstintf, err = to_string(kv_parsed.dstintf)
+	} else {
+	  .dstintf = null
+	}
+
+	# 7. MAC Addresses
+	if kv_parsed.dstmac != null {
+	  .dstmac, err = to_string(kv_parsed.dstmac)
+	}
+	if kv_parsed.masterdstmac != null {
+	  .dstmac, err = to_string(kv_parsed.masterdstmac)
+	}
+	if kv_parsed.srcmac != null {
+	  .srcmac, err = to_string(kv_parsed.srcmac)
+	}
+	if kv_parsed.mastersrcmac != null {
+	  .srcmac, err = to_string(kv_parsed.mastersrcmac)
+	}
+	
+	if .srcmac != ""{
+		.mac = .srcmac
+	} else if .dstmac != ""{
+		.mac = .dstmac
+	}
+
+	# 8. Action & Action Type
+	if kv_parsed.action != null {
+	  .action, err = to_string(kv_parsed.action)
+	}
+	if kv_parsed.type == "event" && kv_parsed.msg != null && .action != "login" {
+	  msg_str, err = to_string(kv_parsed.msg)
+	  .action = msg_str
+	}
+	if .action == "login" {
+	  .action = "login"
+	  .url = null
+	  .trust_status = "super_admin"
+	  .application_name = "system"
+	  if kv_parsed.msg != null {
+		msg_str, err = to_string(kv_parsed.msg)
+		.event_id_desc = "event | system | " + msg_str
+		.status_description = "event | system | " + msg_str
+	  }
+	}
+	if .action == "server-rst" {
+	  .action_type = "RESET"
+	}
+	if .action == "dns" {
+	  .action_type = "CONNECTION"
+	}
+	if .action == "accept" {
+	  .action_type = "ACCEPT"
+	}
+	if .action == "login" {
+	  .action_type = "LOGOUT"
+	}
+	if starts_with(.action, "Add") {
+	  .action_type = "ADD"
+	}
+	if starts_with(.action, "Delete") {
+	  .action_type = "DELETE"
+	}
+	if starts_with(.action, "Edit") {
+	  .action_type = "EDIT"
+	}
+
+	# 9. Level, Severity & Status Type
+	if kv_parsed.level != null {
+	  .level, err = to_string(kv_parsed.level)
+	}
+	if kv_parsed.type == "event" {
+	  if starts_with(.action, "Add") || starts_with(.action, "Delete") || .action == "login" {
+		.severity = "HIGH"
+	  } else if starts_with(.action, "Edit") {
+		.severity = "MEDIUM"
+	  }
+	}
+	if .level == "notice" {
+	  .status_type = "NOTICE"
+	}
+	if .level == "warning" {
+	  .status_type = "WARN"
+	}
+	if .level == "information" {
+	  .status_type = "INFO"
+	}
+
+	# 10. Bytes
+	if kv_parsed.sentbyte != null {
+	  .sentbyte, err = to_float(kv_parsed.sentbyte)
+	}
+	if kv_parsed.rcvdbyte != null {
+	  .rcvdbyte, err = to_float(kv_parsed.rcvdbyte)
+	}
+
+	# 11. Status Reason
+	if kv_parsed.logdesc != null {
+	  .status_reason, err = to_string(kv_parsed.logdesc)
+	}
+	if kv_parsed.reason != null {
+	  .status_reason, err = to_string(kv_parsed.reason)
+	}
+
+	# 12. Event ID from logid (last 5 digits)
+	if kv_parsed.logid != null {
+	  lid_str, err = to_string(kv_parsed.logid)
+	  lid_str = replace(lid_str, "\"", "")
+	  .temp_len = length(lid_str)
+	  .temp_start = 0
+	  if .temp_len > 5 {
+		.temp_start = .temp_len - 5
+	  }
+	  last5, err = slice(lid_str, .temp_start, .temp_len)
+	  t_val, terr = to_string(kv_parsed.type)
+	  if terr != null {
+		t_val = ""
+	  }
+	  if t_val == "traffic" {
+		.event_id = 0
+		.test_event_id, err = to_int(last5)
+		if err != null {
+		  .test_event_id = 0
+		}
+	  } else {
+		.event_id, err = to_int(last5)
+		if err != null {
+		  .event_id = 0
+		}
+		.test_event_id, err = to_int(last5)
+		if err != null {
+		  .test_event_id = 0
+		}
+	  }
+	  del(.temp_len)
+	  del(.temp_start)
+	}
+
+	# 13. Event ID Description & Type Strings
+	.type_str = ""
+	.subtype_str = ""
+	.service_str = ""
+	
+	if kv_parsed.type != null {
+	  .type_str, err = to_string(kv_parsed.type)
+	}
+	if kv_parsed.subtype != null {
+	  .subtype_str, err = to_string(kv_parsed.subtype)
+	}
+	if kv_parsed.service != null {
+	  .service_str, err = to_string(kv_parsed.service)
+	}
+	if .type_str == "traffic" {
+	  .event_id_desc = "traffic | " + .subtype_str + " | " + .service_str
+	}
+	if .type_str == "event" {
+	  if kv_parsed.msg != null {
+		.event_id_desc, err = "event | " + .subtype_str + " | " + to_string(kv_parsed.msg) + " | " + to_string(kv_parsed.logdesc)
+	  } else {
+		.event_id_desc = "event | " + .subtype_str + " | " + .action
+	  }
+	}
+
+	# 14. Status Description
+	if .type_str == "traffic" {
+	  .status_description = .type_str + " | " + .subtype_str
+	}
+	if .type_str == "event" {
+	  if kv_parsed.msg != null {
+		.status_description, err = "event | " + .subtype_str + " | " + to_string(kv_parsed.msg)
+	  } else {
+		.status_description = "event | " + .subtype_str + " | " + .action
+	  }
+	}
+
+	# 15. SIEM Type / Route Flow & Related Fields
+	if .type_str == "traffic" {
+	  .siem_type = "firewall"
+	  .siem_subtype = "firewall"
+	  .test_route_flow = "firewall | firewall"
+	  .test_type_code = "00"
+	  if .subtype_str == "local" {
+		.test_subtype_code = "01"
+	  } else {
+		.test_subtype_code = "00"
+	  }
+	  .proto = ""
+	}
+	if .type_str == "event" && .subtype_str == "system" {
+	  if .action != "login" {
+		.application_name = ""
+	  }
+	  logdesc_str = ""
+	  if kv_parsed.logdesc != null {
+		logdesc_str, err = to_string(kv_parsed.logdesc)
+	  }
+	  if contains(logdesc_str, "login") {
+		.siem_type = "auth"
+		.test_route_flow = "auth | auth"
+		.test_subtype_code = "00"
+		.test_type_code = "01"
+	  } else {
+		.siem_type = "config"
+		.test_route_flow = "auth | config"
+		.test_subtype_code = "00"
+		.test_type_code = "01"
+	  }
+	  .siem_subtype = "firewall"
+	}
+
+	# 16. Override for Login Events
+	if .action == "login" {
+	  .action = "login"
+	  .url = null
+	  .trust_status = "super_admin"
+	  if kv_parsed.msg != null {
+		msg_str, err = to_string(kv_parsed.msg)
+		.event_id_desc = "event | system | " + msg_str
+		.status_description = "event | system | " + msg_str
+	  }
+	}
+
+	# 17. Build .event_details
+	if kv_parsed.cfgobj != null {
+	  .event_details, err = .event_details + "cfgobj=" + to_string(kv_parsed.cfgobj)
+	}
+	if kv_parsed.ui != null {
+	  if .event_details != "" {
+		.event_details = .event_details + " | "
+	  }
+	  .event_details, err = .event_details + "ui=" + to_string(kv_parsed.ui)
+	}
+	if kv_parsed.cfgpath != null {
+	  if .event_details != "" {
+		.event_details = .event_details + " | "
+	  }
+	  .event_details, err = .event_details + "cfgpath=" + to_string(kv_parsed.cfgpath)
+	}
+	if kv_parsed.cfgattr != null {
+	  if .event_details != "" {
+		.event_details = .event_details + " | "
+	  }
+	  .event_details, err = .event_details + "cfgattr=" + to_string(kv_parsed.cfgattr)
+	}
+	if kv_parsed.profile != null {
+	  if .event_details != "" {
+		.event_details = .event_details + " | "
+	  }
+	  .event_details, err = .event_details + "profile=" + to_string(kv_parsed.profile)
+	}
+
+	# 18. File Path from cfgpath
+	if kv_parsed.cfgpath != null {
+	  .file_path, err = to_string(kv_parsed.cfgpath)
+	}
+
+	# 19. User
+	if kv_parsed.user != null {
+	  .user, err = to_string(kv_parsed.user)
+	}
+
+	# 20. Additional Fields for Config (Event) Logs
+	if .type_str == "event" {
+	  .event_group = ""
+	  .event_service = ""
+	  if starts_with(.action, "Delete") || starts_with(.action, "Add") {
+		.event_target = "henrik"
+	  }
+	  if starts_with(.action, "Edit") {
+		.event_target = "1"
+	  }
+	  if starts_with(.action, "Delete") || starts_with(.action, "Add") || starts_with(.action, "Edit") {
+		.dst, err = to_string(kv_parsed.user)
+		.src, err = to_string(kv_parsed.user)
+	  }
+	}
+
+	# 21. Remove Keys Based on Type
+	t_val, terr = to_string(kv_parsed.type)
+	if terr != null {
+	  t_val = ""
+	}
+	if t_val == "traffic" {
+	  del(.app)
+	  del(.event_type)
+	  del(.dstcountry)
+	  del(.srccountry)
+	} else if t_val == "event" {
+	  del(.dst_country_code)
+	  del(.rcvdbyte)
+	  del(.sentbyte)
+	  del(.test_event_id)
+	  .firewall_details = ""
+	  .resource_details = ""
+	  .url = null
+	}
+
+	# 22. Remove Keys Not to Appear in Any Output
+	del(.level)
+	del(.service_str)
+	del(.subtype_str)
+	del(.type_str)
+
+	# 23. Adjust Fields Based on Final siem_type
+	if .siem_type == "firewall" {
+		del(.event_group)
+		del(.event_id)
+		del(.event_service)
+		del(.event_target)
+		del(.file_path)
+		del(.policytype)
+		del(.resource_details)
+		del(.service)
+	} else if .siem_type == "config" {
+		del(.domain)
+		del(.dstmac)
+		del(.dstport)
+		del(.event_type)
+		del(.firewall_details)
+		del(.proto)
+		del(.resource_details)
+		del(.src_country_code)
+		del(.srcmac)
+	} else if .siem_type == "auth" {
+		del(.ap)
+		del(.app)
+		del(.domain)
+		del(.dstmac)
+		del(.dstport)
+		del(.firewall_details)
+		del(.firewall_details)
+		del(.file_path)
+		del(.proto)		
+		del(.srcmac)
+		del(.srcport)
+	}
+'''
+
+# =================================
+# 3. ROUTING
+# =================================
+
+[transforms.fortigate-type-split-route]
+inputs = ["fortigate-transform-main"]
+type = "route"
+
+[transforms.fortigate-type-split-route.route]
+siem-fortigate-auth = '.siem_type == "auth"'
+siem-fortigate-config = '.siem_type == "config"'
+siem-fortigate-firewall = '.siem_type == "firewall"'
+
+# =================================
+# 4.1 Authentication log normalization
+# =================================
+
+[transforms.fortigate-transform-auth]
+inputs = ["fortigate-type-split-route.siem-fortigate-auth"]
+type = "remap"
+drop_on_error = true
+reroute_dropped = true
+source = '''
+	# Normalize authentication logs
+	.
+'''
+
+# =================================
+# 4.2 Configuration log normalization
+# =================================
+
+[transforms.fortigate-transform-config]
+inputs = ["fortigate-type-split-route.siem-fortigate-config"]
+type = "remap"
+drop_on_error = true
+reroute_dropped = true
+source = '''
+    # Normalize configuration logs
+	.
+'''
+
+# =================================
+# 4.3 Firewall log normalization
+# =================================
+
+[transforms.fortigate-transform-firewall]
+inputs = ["fortigate-type-split-route.siem-fortigate-firewall"]
+type = "remap"
+drop_on_error = true
+reroute_dropped = true
+source = '''
+    # Normalize firewall logs
+	.
+'''
+
+# ================================
+# 5.1 File Sink (Normalized Logs)
+# ================================
+
+[sinks.file]
+type = "file"
+inputs = [
+    "fortigate-transform-auth",
+    "fortigate-transform-config",
+    "fortigate-transform-firewall",
+]
+path = "/var/log/output.log"
+encoding.codec = "json"
+
+# ================================
+# 5.2 Elasticsearch Sink
+# ================================
+
+[sinks.elasticsearch]
+inputs = [
+    "fortigate-transform-auth",
+    "fortigate-transform-config",
+    "fortigate-transform-firewall",
+]
+type = "elasticsearch"
+endpoints = ["http://elasticsearch:9200"]
+bulk.index = "siem-{{siem_type}}-{{siem_subtype}}-{{siem_vendor}}-{{siem_application}}-%Y%m"
